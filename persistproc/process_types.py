@@ -28,6 +28,7 @@ class StartProcessResult:
     log_stdout: str | None = None
     log_stderr: str | None = None
     log_combined: str | None = None
+    label: str | None = None
     error: str | None = None
 
 
@@ -50,6 +51,7 @@ class ProcessInfo:
     command: list[str]
     working_directory: str
     status: str
+    label: str
 
 
 @dataclass
@@ -63,6 +65,7 @@ class ProcessStatusResult:
     command: list[str]
     working_directory: str
     status: str
+    label: str
 
 
 @dataclass

@@ -51,6 +51,19 @@ def _escape_cmd(cmd: str, max_len: int = 50) -> str:  # noqa: D401 – helper
     return cmd[:max_len]
 
 
+def get_label(
+    explicit_label: str | None, command: str, working_directory: str | None
+) -> str:
+    """Generate a process label from explicit label or command + working directory."""
+    if explicit_label:
+        return explicit_label
+
+    # Generate default label in format '<cmd> in <wd>'
+    cmd_display = command if len(command) <= 50 else command[:47] + "..."
+    wd_display = working_directory or "."
+    return f"{cmd_display} in {wd_display}"
+
+
 # Interval for the monitor thread (overridable for tests)
 _POLL_INTERVAL = float(os.environ.get("PERSISTPROC_TEST_POLL_INTERVAL", "1.0"))
 
@@ -64,6 +77,7 @@ class _ProcEntry:  # noqa: D401 – internal state
     start_time: str
     status: str  # running | exited | terminated | failed
     log_prefix: str
+    label: str
     exit_code: int | None = None
     exit_time: str | None = None
     # Keep a reference so we can signal/poll. Excluded from comparisons.
@@ -186,27 +200,27 @@ class ProcessManager:  # noqa: D101
         command: str,
         working_directory: Path | None = None,
         environment: dict[str, str] | None = None,
+        label: str | None = None,
     ) -> StartProcessResult:  # noqa: D401
         if self._log_mgr is None:
             raise RuntimeError("ProcessManager.bootstrap() must be called first")
 
         logger.debug("start: received command=%s type=%s", command, type(command))
 
-        # Prevent duplicate *running* command instances (helps humans)
+        # Generate label before duplicate check
+        process_label = get_label(
+            label, command, str(working_directory) if working_directory else None
+        )
+
+        # Prevent duplicate *running* labels (helps humans)
         logger.debug("start: acquiring lock")
         with self._lock:
             logger.debug("start: lock acquired")
             for ent in self._processes.values():
-                # Treat *command* and *working_directory* together as identity so
-                # you can run the *same* command from different directories.
-                if (
-                    ent.command == shlex.split(command)
-                    and (ent.working_directory or "")
-                    == (str(working_directory) if working_directory else "")
-                    and ent.status == "running"
-                ):
+                # Check for duplicate labels in running processes
+                if ent.label == process_label and ent.status == "running":
                     raise ValueError(
-                        f"Command '{command}' already running in '{ent.working_directory}' with PID {ent.pid}."
+                        f"Process with label '{process_label}' already running with PID {ent.pid}."
                     )
         logger.debug("start: lock released")
 
@@ -254,6 +268,7 @@ class ProcessManager:  # noqa: D101
             start_time=_get_iso_ts(),
             status="running",
             log_prefix=prefix,
+            label=process_label,
             proc=proc,
         )
 
@@ -276,6 +291,7 @@ class ProcessManager:  # noqa: D101
             log_stdout=self._log_mgr.paths_for(prefix).stdout,
             log_stderr=self._log_mgr.paths_for(prefix).stderr,
             log_combined=self._log_mgr.paths_for(prefix).combined,
+            label=process_label,
         )
 
     # ------------------------------------------------------------------
@@ -301,6 +317,7 @@ class ProcessManager:  # noqa: D101
                     command=ent.command,
                     working_directory=ent.working_directory,
                     status=ent.status,
+                    label=ent.label,
                 )
                 logger.debug("get_status: lock released for pid=%d", pid)
                 return result
@@ -319,16 +336,40 @@ class ProcessManager:  # noqa: D101
         command: str | None = None,
         working_directory: Path | None = None,
         force: bool = False,
+        label: str | None = None,
     ) -> StopProcessResult:  # noqa: D401
-        if pid is None and command is None:
+        if pid is None and command is None and label is None:
             return StopProcessResult(
-                error="Either pid or command must be provided to stop"
+                error="Either pid, command, or label must be provided to stop"
             )
 
         pid_to_stop: int | None = None
 
         if pid is not None:
             pid_to_stop = pid
+        elif label is not None:
+            # Find PID from label, if not found try as command
+            logger.debug("stop: acquiring lock to find pid by label")
+            with self._lock:
+                logger.debug("stop: lock acquired to find pid by label")
+                # First try to match by label
+                for p in self._processes.values():
+                    if p.label == label and p.status == "running":
+                        pid_to_stop = p.pid
+                        break
+
+                # If not found by label, try to match as command with working directory
+                # Note: This fallback is only for when a full command string is passed as a label
+                if pid_to_stop is None:
+                    for p in self._processes.values():
+                        if (
+                            p.command == shlex.split(label)
+                            and p.working_directory == str(working_directory)
+                            and p.status == "running"
+                        ):
+                            pid_to_stop = p.pid
+                            break
+            logger.debug("stop: lock released after finding pid by label/command")
         elif command is not None:
             # Find PID from command + CWD
             logger.debug("stop: acquiring lock to find pid")
@@ -345,7 +386,7 @@ class ProcessManager:  # noqa: D101
                         break
             logger.debug("stop: lock released after finding pid")
         else:
-            raise ValueError("stop requires pid or command")
+            raise ValueError("stop requires pid, command, or label")
 
         if pid_to_stop is None:
             return StopProcessResult(error="Process not found")
@@ -403,6 +444,7 @@ class ProcessManager:  # noqa: D101
         pid: int | None = None,
         command: str | None = None,
         working_directory: Path | None = None,
+        label: str | None = None,
     ) -> RestartProcessResult:  # noqa: D401
         """Attempt to stop then start *pid*.
 
@@ -420,7 +462,30 @@ class ProcessManager:  # noqa: D101
 
         pid_to_restart: int | None = pid
 
-        if pid_to_restart is None and command:
+        if pid_to_restart is None and label:
+            # Find PID from label, if not found try as command
+            logger.debug("restart: acquiring lock to find pid by label")
+            with self._lock:
+                logger.debug("restart: lock acquired to find pid by label")
+                # First try to match by label
+                for p in self._processes.values():
+                    if p.label == label and p.status == "running":
+                        pid_to_restart = p.pid
+                        break
+
+                # If not found by label, try to match as command with working directory
+                # Note: This fallback is only for when a full command string is passed as a label
+                if pid_to_restart is None:
+                    for p in self._processes.values():
+                        if (
+                            p.command == shlex.split(label)
+                            and p.working_directory == str(working_directory)
+                            and p.status == "running"
+                        ):
+                            pid_to_restart = p.pid
+                            break
+            logger.debug("restart: lock released after finding pid by label/command")
+        elif pid_to_restart is None and command:
             logger.debug("restart: acquiring lock to find pid")
             with self._lock:
                 logger.debug("restart: lock acquired to find pid")
@@ -481,7 +546,10 @@ class ProcessManager:  # noqa: D101
             type(original_command_str),
         )
         start_res = self.start(
-            original_command_str, working_directory=cwd, environment=env
+            original_command_str,
+            working_directory=cwd,
+            environment=env,
+            label=original_entry.label,
         )
 
         logger.debug(
@@ -638,6 +706,7 @@ class ProcessManager:  # noqa: D101
             command=ent.command,
             working_directory=ent.working_directory or "",
             status=ent.status,
+            label=ent.label,
         )
 
     def _monitor_loop(self) -> None:  # noqa: D401 – thread target

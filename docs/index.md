@@ -23,6 +23,20 @@ If you're working with an LLM agent such as Cursor or Claude Code, if you see an
 
 If the agent could see the changes directly, you wouldn't need to do anything! With persistproc, that's possible. Instead of saying `npm run dev`, say `persistproc npm run dev`, and the agent can instantly read its output or even restart it. Otherwise, you can still see its output in your original terminal, and kill it with Ctrl+C, like your normally do.
 
+```mermaid
+graph TB
+    User[User] -->|"persistproc npm run dev"| PP[persistproc server]
+    PP <-->|"manages / logs"| NPM["npm run dev<br/>(web server)"]
+    PP -.->|"streams output"| User
+    
+    Agent[Cursor] -.->|"get_output()<br/>restart()"| PP
+    
+    style PP fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    style NPM fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style User fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style Agent fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
+```
+
 ### Example use case: complex web development
 
 Suppose you need to run four processes to get your web app working locally. Maybe an API, frontend server, SCSS builder, and Postgres. Each service emits its own logs.
@@ -30,6 +44,33 @@ Suppose you need to run four processes to get your web app working locally. Mayb
 If you run into an error while testing locally, you can go read all four log files to find out what happened.
 
 But if you started those processes with persistproc, then the agent can read everything at once and possibly give you a quicker diagnosis.
+
+```mermaid
+graph TB
+    User[User] -->|"starts processes"| PP[persistproc server]
+    
+    subgraph processes["Managed Processes"]
+        API[API Server]
+        FE[Frontend Server]
+        SCSS[SCSS Builder]
+        DB[Postgres]
+    end
+    
+    PP <-->|"manages / logs"| processes
+    
+    Agent1[Claude Code] -.->|"read logs<br/>diagnose issues"| PP
+    Agent2[Cursor] -.->|"read logs<br/>diagnose issues"| PP
+    
+    style PP fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    style API fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style FE fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style SCSS fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style DB fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style User fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style Agent1 fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
+    style Agent2 fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
+    style processes fill:#f5f5f5,stroke:#999,stroke-width:1px,stroke-dasharray: 5 5
+```
 
 > [!NOTE]
 > **Why not just use Cursor and let the agent open a terminal?**

@@ -49,6 +49,11 @@ def _make_mcp_request(tool_name: str, port: int, payload: dict | None = None) ->
 
             # Result is a JSON string in the `text` attribute.
             result_data = json.loads(results[0].text)
+
+            # Always pretty-print the raw JSON to stdout so machine parsers (tests) can
+            # reliably consume the output regardless of whether there's an error.
+            print(json.dumps(result_data, indent=2))
+
             if result_data.get("error"):
                 CLI_LOGGER.error(result_data["error"])
                 return
@@ -59,11 +64,6 @@ def _make_mcp_request(tool_name: str, port: int, payload: dict | None = None) ->
                 if not procs:
                     CLI_LOGGER.info("No processes running.")
 
-            # Always pretty-print the raw JSON to stdout so machine parsers (tests) can
-            # reliably consume the output regardless of whether the list is
-            # empty or not.
-            print(json.dumps(result_data, indent=2))
-
     try:
         asyncio.run(_do_call())
     except ConnectionError:
@@ -72,11 +72,22 @@ def _make_mcp_request(tool_name: str, port: int, payload: dict | None = None) ->
             port,
         )
     except Exception as e:
-        CLI_LOGGER.error("Unexpected error while calling tool '%s': %s", tool_name, e)
-        CLI_LOGGER.error(
-            "Cannot reach persistproc server on port %d. Make sure it is running (`persistproc serve`) or specify the correct port with --port or PERSISTPROC_PORT.",
-            port,
-        )
+        # Check if this is an MCP tool error response
+        error_str = str(e)
+        if error_str.startswith("Error calling tool"):
+            # Extract the error message and output as JSON for tests
+            error_msg = error_str.replace(f"Error calling tool '{tool_name}': ", "")
+            error_response = {"error": error_msg}
+            print(json.dumps(error_response, indent=2))
+            CLI_LOGGER.error(error_msg)
+        else:
+            CLI_LOGGER.error(
+                "Unexpected error while calling tool '%s': %s", tool_name, e
+            )
+            CLI_LOGGER.error(
+                "Cannot reach persistproc server on port %d. Make sure it is running (`persistproc serve`) or specify the correct port with --port or PERSISTPROC_PORT.",
+                port,
+            )
 
 
 class ITool(abc.ABC):
@@ -121,6 +132,7 @@ class StartProcessTool(ITool):
             command: str,
             working_directory: str | None = None,
             environment: dict[str, str] | None = None,
+            label: str | None = None,
         ) -> StartProcessResult:
             """Start a new long-running process."""
             logger.info("start called – cmd=%s, cwd=%s", command, working_directory)
@@ -130,6 +142,7 @@ class StartProcessTool(ITool):
                     Path(working_directory) if working_directory else None
                 ),
                 environment=environment,
+                label=label,
             )
 
         mcp.add_tool(
@@ -139,26 +152,20 @@ class StartProcessTool(ITool):
         )
 
     def build_subparser(self, parser: ArgumentParser) -> None:
+        parser.add_argument(
+            "--working-directory",
+            default=os.getcwd(),
+            help="The working directory for the process.",
+        )
+        parser.add_argument(
+            "--label",
+            type=str,
+            help="Custom label for the process (default: '<command> in <working_directory>').",
+        )
         parser.add_argument("command_", metavar="COMMAND", help="The command to run.")
-        parser.add_argument(
-            "args", nargs=argparse.REMAINDER, help="Arguments to the command"
-        )
-        parser.add_argument(
-            "--working-directory", help="The working directory for the process."
-        )
-        parser.add_argument(
-            "--environment",
-            nargs="*",
-            help="Environment variables to set for the process, in KEY=VALUE format.",
-        )
+        parser.add_argument("args", nargs="*", help="Arguments to the command")
 
     def call_with_args(self, args: Namespace) -> None:
-        env = (
-            dict(item.split("=", 1) for item in args.environment)
-            if args.environment
-            else None
-        )
-
         # Construct the command string from command and args
         if args.args:
             command = shlex.join([args.command_] + args.args)
@@ -168,7 +175,8 @@ class StartProcessTool(ITool):
         payload = {
             "command": command,
             "working_directory": args.working_directory,
-            "environment": env,
+            "environment": dict(os.environ),
+            "label": getattr(args, "label", None),
         }
         _make_mcp_request(self.name, args.port, payload)
 
@@ -227,6 +235,7 @@ class StopProcessTool(ITool):
             command: str | None = None,
             working_directory: str | None = None,
             force: bool = False,
+            label: str | None = None,
         ) -> StopProcessResult:
             """Stop a running process by its PID."""
             logger.info(
@@ -243,21 +252,24 @@ class StopProcessTool(ITool):
                     Path(working_directory) if working_directory else None
                 ),
                 force=force,
+                label=label,
             )
 
         mcp.add_tool(FunctionTool.from_function(stop, name=self.name))
 
     def build_subparser(self, parser: ArgumentParser) -> None:
         parser.add_argument(
-            "command_or_pid",
-            metavar="COMMAND_OR_PID",
-            help="The command or PID to stop.",
+            "target",
+            metavar="TARGET",
+            help="The PID, label, or command to stop.",
         )
         parser.add_argument(
             "args", nargs=argparse.REMAINDER, help="Arguments to the command"
         )
         parser.add_argument(
-            "--working-directory", help="The working directory for the process."
+            "--working-directory",
+            default=os.getcwd(),
+            help="The working directory for the process.",
         )
         parser.add_argument(
             "--force", action="store_true", help="Force stop the process."
@@ -266,24 +278,26 @@ class StopProcessTool(ITool):
     def call_with_args(self, args: Namespace) -> None:
         pid = None
         command = None
+        label = None
 
         if not args.args:
+            # Single target argument - could be PID, label, or command
             try:
-                pid = int(args.command_or_pid)
+                pid = int(args.target)
             except ValueError:
-                command = args.command_or_pid
+                # Not a PID, could be label or command
+                # Let the server determine if it's a label or command
+                label = args.target
         else:
-            command = shlex.join([args.command_or_pid] + args.args)
-
-        if pid is None and command is None:
-            CLI_LOGGER.error("Must provide either a PID or a command to stop.")
-            return
+            # Multiple arguments - treat as command with args
+            command = shlex.join([args.target] + args.args)
 
         payload = {
             "pid": pid,
             "command": command,
             "working_directory": args.working_directory,
             "force": args.force,
+            "label": label,
         }
         _make_mcp_request(self.name, args.port, payload)
 
@@ -299,6 +313,7 @@ class RestartProcessTool(ITool):
             pid: int | None = None,
             command: str | None = None,
             working_directory: str | None = None,
+            label: str | None = None,
         ) -> RestartProcessResult:
             """Stops a process and starts it again with the same parameters."""
             logger.info(
@@ -313,41 +328,50 @@ class RestartProcessTool(ITool):
                 working_directory=(
                     Path(working_directory) if working_directory else None
                 ),
+                label=label,
             )
 
         mcp.add_tool(FunctionTool.from_function(restart, name=self.name))
 
     def build_subparser(self, parser: ArgumentParser) -> None:
         parser.add_argument(
-            "command_or_pid",
-            metavar="COMMAND_OR_PID",
-            help="The command or PID to restart.",
+            "target",
+            metavar="TARGET",
+            help="The PID, label, or command to restart.",
         )
         # Remaining args will be parsed manually.
         parser.add_argument("args", nargs="*")
         parser.add_argument(
-            "--working-directory", help="The working directory for the process."
+            "--working-directory",
+            default=os.getcwd(),
+            help="The working directory for the process.",
         )
 
     def call_with_args(self, args: Namespace) -> None:
-        # Construct the command string from command and args
-        if args.args:
-            command = shlex.join([args.command_or_pid] + args.args)
-        else:
-            if args.command_or_pid.isdigit():
-                _make_mcp_request(
-                    self.name, args.port, {"pid": int(args.command_or_pid)}
-                )
-                return
-            else:
-                command = args.command_or_pid
+        pid = None
+        command = None
+        label = None
 
-        # Default working directory to current directory if not specified
-        working_directory = args.working_directory or os.getcwd()
+        if not args.args:
+            # Single target argument - could be PID, label, or command
+            try:
+                pid = int(args.target)
+            except ValueError:
+                # Not a PID, could be label or command
+                # Let the server determine if it's a label or command
+                label = args.target
+        else:
+            # Multiple arguments - treat as command with args
+            command = shlex.join([args.target] + args.args)
+
+        # Default working directory is set at argparse level
+        working_directory = args.working_directory
 
         payload = {
+            "pid": pid,
             "command": command,
             "working_directory": working_directory,
+            "label": label,
         }
         _make_mcp_request(self.name, args.port, payload)
 

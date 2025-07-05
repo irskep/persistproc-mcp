@@ -147,7 +147,11 @@ def _tail_file(
 
 
 async def _start_or_get_process_via_mcp(
-    port: str, cmd_tokens: list[str], fresh: bool, working_directory: str
+    port: str,
+    cmd_tokens: list[str],
+    fresh: bool,
+    working_directory: str,
+    label: str | None = None,
 ) -> tuple[int, Path]:  # noqa: D401 – helper
     """Ensure the desired command is running via *persistproc* MCP.
 
@@ -182,14 +186,14 @@ async def _start_or_get_process_via_mcp(
                     existing = None
 
                 if existing is None:
-                    start_res = await client.call_tool(
-                        "start",
-                        {
-                            "command": command_str,
-                            "working_directory": working_directory,
-                            "environment": dict(os.environ),
-                        },
-                    )
+                    start_params = {
+                        "command": command_str,
+                        "working_directory": working_directory,
+                        "environment": dict(os.environ),
+                    }
+                    if label is not None:
+                        start_params["label"] = label
+                    start_res = await client.call_tool("start", start_params)
                     start_info = json.loads(start_res[0].text)
                     if start_info["error"]:
                         CLI_LOGGER.error(start_info["error"])
@@ -305,6 +309,7 @@ def run(
     on_exit: str = "ask",  # ask|stop|detach
     raw: bool = False,
     port: int | None = None,
+    label: str | None = None,
 ) -> None:  # noqa: D401
     """Ensure *command* is running via *persistproc* and tail its combined output.
 
@@ -357,7 +362,7 @@ def run(
 
     try:
         pid, combined_path = asyncio.run(
-            _start_or_get_process_via_mcp(port, cmd_tokens, fresh, cwd)
+            _start_or_get_process_via_mcp(port, cmd_tokens, fresh, cwd, label)
         )
     except (ConnectionError, OSError) as exc:
         CLI_LOGGER.error(

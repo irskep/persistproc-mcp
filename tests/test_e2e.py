@@ -147,17 +147,9 @@ def test_start_process_with_working_directory(server):
     # Use a different directory (parent of current script location)
     work_dir = str(Path(__file__).parent.parent)
 
-    # CLI expects: start COMMAND [args...] --working-directory DIR
-    # So we pass the command as separate arguments
-    start = run_cli(
-        "start",
-        "python",
-        str(COUNTER_SCRIPT),
-        "--num-iterations",
-        "5",
-        "--working-directory",
-        work_dir,
-    )
+    # CLI expects: start --working-directory DIR COMMAND
+    start_cmd = f"python {COUNTER_SCRIPT} --num-iterations 5"
+    start = run_cli("start", "--working-directory", work_dir, start_cmd)
     data = extract_json(start.stdout)
     pid = data["pid"]
 
@@ -172,17 +164,10 @@ def test_start_process_with_working_directory(server):
 
 
 def test_start_process_with_environment(server):
-    """Test start with environment parameter."""
-    # CLI expects: start COMMAND [args...] --environment KEY=VALUE
-    start = run_cli(
-        "start",
-        "python",
-        str(COUNTER_SCRIPT),
-        "--num-iterations",
-        "5",
-        "--environment",
-        "TEST_VAR=test_value",
-    )
+    """Test start inherits environment from shell."""
+    # Environment variables are inherited from shell, not passed via CLI
+    start_cmd = f"python {COUNTER_SCRIPT} --num-iterations 5"
+    start = run_cli("start", start_cmd)
     data = extract_json(start.stdout)
     pid = data["pid"]
 
@@ -197,13 +182,8 @@ def test_start_process_with_environment(server):
 
 def test_stop_process_with_force(server):
     """Test stop with force=True."""
-    start = run_cli(
-        "start",
-        "python",
-        str(COUNTER_SCRIPT),
-        "--num-iterations",
-        "0",
-    )
+    start_cmd = f"python {COUNTER_SCRIPT} --num-iterations 0"
+    start = run_cli("start", start_cmd)
     data = extract_json(start.stdout)
     pid = data["pid"]
 
@@ -224,12 +204,8 @@ def test_stop_process_with_force(server):
 def test_get_process_output_stderr(server):
     """Test get_output with stderr stream."""
     # Use a script that writes to stderr
-    start = run_cli(
-        "start",
-        "python",
-        "-c",
-        "import sys; import time; [print('error', i, file=sys.stderr) or time.sleep(0.1) for i in range(20)]",
-    )
+    start_cmd = "python -c \"import sys; import time; [print('error', i, file=sys.stderr) or time.sleep(0.1) for i in range(20)]\""
+    start = run_cli("start", start_cmd)
     data = extract_json(start.stdout)
     pid = data["pid"]
 
@@ -251,13 +227,8 @@ def test_get_process_output_stderr(server):
 
 def test_get_process_output_with_lines_limit(server):
     """Test get_output with lines parameter."""
-    start = run_cli(
-        "start",
-        "python",
-        str(COUNTER_SCRIPT),
-        "--num-iterations",
-        "0",
-    )
+    start_cmd = f"python {COUNTER_SCRIPT} --num-iterations 0"
+    start = run_cli("start", start_cmd)
     data = extract_json(start.stdout)
     pid = data["pid"]
 
@@ -276,13 +247,8 @@ def test_get_process_output_with_lines_limit(server):
 
 def test_get_process_output_with_time_filters(server):
     """Test get_output with before_time and since_time parameters."""
-    start = run_cli(
-        "start",
-        "python",
-        str(COUNTER_SCRIPT),
-        "--num-iterations",
-        "0",
-    )
+    start_cmd = f"python {COUNTER_SCRIPT} --num-iterations 0"
+    start = run_cli("start", start_cmd)
     data = extract_json(start.stdout)
     pid = data["pid"]
 
